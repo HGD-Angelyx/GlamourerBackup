@@ -9,10 +9,4 @@
     <TargetFramework>net10.0-windows</TargetFramework>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Reference Include="Glamourer.Api">
-      <HintPath>$(HOME)/.xlcore/installedPlugins/Glamourer/1.6.1.7/Glamourer.Api.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-  </ItemGroup>
 </Project>

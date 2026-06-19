@@ -3,7 +3,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Bindings.ImGui;
-using Glamourer.Api.IpcSubscribers;
+using Dalamud.Plugin.Ipc;
 using System.Diagnostics;
 using System.Numerics;
 using System.Text;
@@ -25,7 +25,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     private readonly string _glamourerConfigDir;
     private readonly string _backupBaseDir;
 
-    private readonly GetStateBase64Name? _getState;
+    private readonly ICallGateSubscriber<string, uint, (int, string?)>? _getState;
 
     public string BackupBaseDir => _backupBaseDir;
     public Configuration Configuration { get; }
@@ -61,15 +61,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
         if (!Directory.Exists(_backupBaseDir))
             Directory.CreateDirectory(_backupBaseDir);
 
-        try
-        {
-            _getState = new GetStateBase64Name(pluginInterface);
-            _log.Information("Glamourer API initialized.");
-        }
-        catch (Exception ex)
-        {
-            _log.Warning(ex, "Could not initialize Glamourer API. Current-outfit backup will be unavailable.");
-        }
+        _getState = pluginInterface.GetIpcSubscriber<string, uint, (int, string?)>("Glamourer.GetStateBase64Name");
 
         _windowSystem = new WindowSystem("GlamourerBackup");
         SettingsWindow = new SettingsWindow(this);
@@ -174,27 +166,21 @@ public sealed class GlamourerBackup : IDalamudPlugin
 
     private async Task RunCurrentOutfitBackupAsync()
     {
-        if (_getState == null)
+        var player = _objectTable.LocalPlayer;
+        if (player == null)
         {
-            _log.Warning("Glamourer API not available, skipping current-outfit backup.");
+            _log.Warning("No local player found, skipping current-outfit backup.");
             return;
         }
 
         try
         {
-            var player = _objectTable.LocalPlayer;
-            if (player == null)
-            {
-                _log.Warning("No local player found, skipping current-outfit backup.");
-                return;
-            }
-
             var playerName = player.Name.TextValue;
-            var (ec, stateBase64) = _getState.Invoke(playerName, 0);
+            var (ec, stateBase64) = _getState!.InvokeFunc(playerName, 0u);
 
-            if (ec != Glamourer.Api.Enums.GlamourerApiEc.Success || stateBase64 == null)
+            if (ec != 0 || stateBase64 == null)
             {
-                _log.Warning("Failed to get current outfit state: {Ec}", ec);
+                _log.Warning("Failed to get current outfit state (error {Ec}). Is Glamourer installed?", ec);
                 return;
             }
 
@@ -211,7 +197,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
         }
         catch (Exception ex)
         {
-            _log.Error(ex, "Failed to back up current outfit");
+            _log.Warning(ex, "Failed to back up current outfit (Glamourer might not be installed)");
         }
     }
 
