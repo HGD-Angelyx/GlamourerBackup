@@ -1,6 +1,6 @@
 {
   "Name": "Glamourer Backup",
-  "Author": "iwakura",
+  "Author": "HGD-Angelyx",
   "Punchline": "Automatically backs up your Glamourer designs at user-set intervals.",
   "Description": "Periodically creates timestamped backups of all your Glamourer designs to prevent outfit loss on crashes. Configure the backup interval in settings.",
   "InternalName": "GlamourerBackup",
