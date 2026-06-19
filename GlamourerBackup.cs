@@ -4,9 +4,10 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin.Ipc;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System.Diagnostics;
 using System.Numerics;
-using System.Text;
 
 namespace GlamourerBackup;
 
@@ -26,11 +27,13 @@ public sealed class GlamourerBackup : IDalamudPlugin
     private readonly string _backupBaseDir;
     private readonly string _currentOutfitDir;
 
-    private readonly ICallGateSubscriber<string, uint, (int, string?)>? _getState;
+    private readonly ICallGateSubscriber<string, uint, (int, JObject?)>? _getState;
+    private readonly ICallGateSubscriber<JObject, string, uint, int, int>? _applyState;
 
     public string BackupBaseDir => _backupBaseDir;
     public Configuration Configuration { get; }
     public SettingsWindow SettingsWindow { get; }
+    public IPluginLog Log => _log;
 
     private DateTime _lastBackup = DateTime.MinValue;
     private bool _settingsVisible;
@@ -66,7 +69,8 @@ public sealed class GlamourerBackup : IDalamudPlugin
         if (!Directory.Exists(_currentOutfitDir))
             Directory.CreateDirectory(_currentOutfitDir);
 
-        _getState = pluginInterface.GetIpcSubscriber<string, uint, (int, string?)>("Glamourer.GetStateBase64Name");
+        _getState = pluginInterface.GetIpcSubscriber<string, uint, (int, JObject?)>("Glamourer.GetStateName");
+        _applyState = pluginInterface.GetIpcSubscriber<JObject, string, uint, int, int>("Glamourer.ApplyStateName");
 
         _windowSystem = new WindowSystem("GlamourerBackup");
         SettingsWindow = new SettingsWindow(this);
@@ -85,7 +89,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
         if (Configuration.BackupOnPluginStart)
             _ = RunBackupAsync();
 
-        _log.Information("Glamourer Backup loaded. Designs dir: {Dir}", _glamourerDesignsDir);
+        _log.Information("Glamourer Backup loaded.");
     }
 
     public void Dispose()
@@ -155,7 +159,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
                         File.Copy(org, Path.Combine(backupDir, "organization.json"), overwrite: true);
                 }
 
-                _log.Information("Backup complete: {Count} designs saved to {Dir}", copiedCount, backupDir);
+                _log.Information("Design backup complete: {Count} designs saved to {Dir}", copiedCount, backupDir);
             }
 
             if (Configuration.IncludeCurrentOutfit)
@@ -181,16 +185,15 @@ public sealed class GlamourerBackup : IDalamudPlugin
         try
         {
             var playerName = player.Name.TextValue;
-            var (ec, stateBase64) = _getState!.InvokeFunc(playerName, 0u);
+            var (ec, stateObj) = _getState!.InvokeFunc(playerName, 0u);
 
-            if (ec != 0 || stateBase64 == null)
+            if (ec != 0 || stateObj == null)
             {
                 _log.Warning("Failed to get current outfit state (error {Ec}). Is Glamourer installed?", ec);
                 return;
             }
 
-            var jsonBytes = Convert.FromBase64String(stateBase64);
-            var json = Encoding.UTF8.GetString(jsonBytes);
+            var json = stateObj.ToString(Formatting.Indented);
 
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var fileName = $"current_outfit_{timestamp}.json";
@@ -203,6 +206,47 @@ public sealed class GlamourerBackup : IDalamudPlugin
         catch (Exception ex)
         {
             _log.Warning(ex, "Failed to back up current outfit (Glamourer might not be installed)");
+        }
+    }
+
+    public void ApplyBackup(string filePath)
+    {
+        var player = _objectTable.LocalPlayer;
+        if (player == null)
+        {
+            _log.Warning("No local player found, cannot apply backup.");
+            return;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(filePath);
+            var stateObj = JObject.Parse(json);
+            var playerName = player.Name.TextValue;
+            var ec = _applyState!.InvokeFunc(stateObj, playerName, 0u, 6);
+
+            if (ec != 0)
+                _log.Warning("Failed to apply backup (error {Ec})", ec);
+            else
+                _log.Information("Backup applied to {Player}", playerName);
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "Failed to apply backup {File}", filePath);
+        }
+    }
+
+    public string[] GetCurrentOutfitBackups()
+    {
+        try
+        {
+            return Directory.GetFiles(_currentOutfitDir, "current_outfit_*.json")
+                .OrderByDescending(f => new FileInfo(f).CreationTimeUtc)
+                .ToArray();
+        }
+        catch
+        {
+            return [];
         }
     }
 
@@ -268,14 +312,17 @@ public class SettingsWindow : Window
     private bool _includeCurrentOutfit;
     private string _statusMessage = string.Empty;
     private int _statusFrameCount;
+    private string[] _backupFiles = [];
+    private string _applyStatus = string.Empty;
+    private int _applyStatusFrames;
 
     public SettingsWindow(GlamourerBackup plugin) : base("Glamourer Backup Settings")
     {
         _plugin = plugin;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(420, 300),
-            MaximumSize = new Vector2(700, 500)
+            MinimumSize = new Vector2(460, 400),
+            MaximumSize = new Vector2(700, 600)
         };
         Flags = ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.AlwaysAutoResize;
         LoadSettings();
@@ -289,6 +336,7 @@ public class SettingsWindow : Window
         _includeEph = _plugin.Configuration.IncludeEphemeralConfig;
         _includeOrg = _plugin.Configuration.IncludeOrganization;
         _includeCurrentOutfit = _plugin.Configuration.IncludeCurrentOutfit;
+        _backupFiles = _plugin.GetCurrentOutfitBackups();
     }
 
     public override void Draw()
@@ -336,6 +384,38 @@ public class SettingsWindow : Window
         {
             ImGui.TextColored(new Vector4(0, 1, 0, 1), _statusMessage);
             _statusFrameCount++;
+        }
+
+        ImGui.Separator();
+        ImGui.Text("Restore Current Outfit");
+
+        if (ImGui.Button("Refresh list"))
+        {
+            _backupFiles = _plugin.GetCurrentOutfitBackups();
+        }
+
+        ImGui.BeginChild("backupList", new Vector2(0, 150), true);
+        foreach (var file in _backupFiles)
+        {
+            var name = Path.GetFileName(file);
+            var time = File.GetCreationTime(file).ToString("yyyy-MM-dd HH:mm:ss");
+            ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1), time);
+            ImGui.SameLine();
+            ImGui.Text(name);
+            ImGui.SameLine();
+            if (ImGui.Button($"Apply##{name}"))
+            {
+                _plugin.ApplyBackup(file);
+                _applyStatus = $"Applied {name}";
+                _applyStatusFrames = 0;
+            }
+        }
+        ImGui.EndChild();
+
+        if (_applyStatusFrames < 120)
+        {
+            ImGui.TextColored(new Vector4(0, 1, 0, 1), _applyStatus);
+            _applyStatusFrames++;
         }
 
         if (changed)
