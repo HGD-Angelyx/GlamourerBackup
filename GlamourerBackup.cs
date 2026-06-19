@@ -24,6 +24,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     private readonly string _glamourerDesignsDir;
     private readonly string _glamourerConfigDir;
     private readonly string _backupBaseDir;
+    private readonly string _currentOutfitDir;
 
     private readonly ICallGateSubscriber<string, uint, (int, string?)>? _getState;
 
@@ -58,8 +59,12 @@ public sealed class GlamourerBackup : IDalamudPlugin
         _glamourerConfigDir = pluginConfigsDir;
         _glamourerDesignsDir = Path.Combine(pluginConfigsDir, "designs");
 
+        _currentOutfitDir = Path.Combine(_backupBaseDir, "CurrentOutfit");
+
         if (!Directory.Exists(_backupBaseDir))
             Directory.CreateDirectory(_backupBaseDir);
+        if (!Directory.Exists(_currentOutfitDir))
+            Directory.CreateDirectory(_currentOutfitDir);
 
         _getState = pluginInterface.GetIpcSubscriber<string, uint, (int, string?)>("Glamourer.GetStateBase64Name");
 
@@ -189,7 +194,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
 
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var fileName = $"current_outfit_{timestamp}.json";
-            var filePath = Path.Combine(_backupBaseDir, fileName);
+            var filePath = Path.Combine(_currentOutfitDir, fileName);
 
             await File.WriteAllTextAsync(filePath, json);
 
@@ -231,8 +236,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     {
         try
         {
-            var pattern = "current_outfit_*.json";
-            var files = Directory.GetFiles(_backupBaseDir, pattern)
+            var files = Directory.GetFiles(_currentOutfitDir, "current_outfit_*.json")
                 .Select(f => new FileInfo(f))
                 .OrderByDescending(f => f.CreationTimeUtc)
                 .ToList();
