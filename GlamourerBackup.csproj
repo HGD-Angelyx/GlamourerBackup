@@ -1,0 +1,18 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <AssemblyName>GlamourerBackup</AssemblyName>
+    <RootNamespace>GlamourerBackup</RootNamespace>
+    <PackageProjectUrl>https://github.com/iwakura/GlamourerBackup</PackageProjectUrl>
+    <IsPackable>false</IsPackable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Glamourer.Api">
+      <HintPath>$(HOME)/.xlcore/installedPlugins/Glamourer/1.6.1.7/Glamourer.Api.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
