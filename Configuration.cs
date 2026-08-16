@@ -17,6 +17,8 @@ public class Configuration : IPluginConfiguration
     public bool IncludeOrganization { get; set; } = true;
     public bool IncludeCurrentOutfit { get; set; } = true;
     public bool BetterAutomation { get; set; } = false;
+    public bool ShowBackgroundImage { get; set; } = true;
+    public float BackgroundDim { get; set; } = 0.5f;
 
     [NonSerialized] private IDalamudPluginInterface? _pi;
 
