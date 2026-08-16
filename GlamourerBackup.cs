@@ -4,6 +4,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin.Ipc;
+using Dalamud.Interface.Textures.TextureWraps;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Diagnostics;
@@ -22,6 +23,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     private readonly IFramework _framework;
     private readonly IObjectTable _objectTable;
     private readonly IClientState _clientState;
+    private readonly ITextureProvider _textureProvider;
     private readonly WindowSystem _windowSystem;
 
     private readonly string _glamourerDesignsDir;
@@ -29,6 +31,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     private readonly string _backupBaseDir;
     private readonly string _currentOutfitDir;
     private readonly string _autoBackupPath;
+    private readonly string _bundledBackgroundPath;
 
     private readonly ICallGateSubscriber<string, uint, (int, JObject?)>? _getState;
     private readonly ICallGateSubscriber<JObject, string, uint, int, int>? _applyState;
@@ -37,6 +40,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     public Configuration Configuration { get; }
     public SettingsWindow SettingsWindow { get; }
     public IPluginLog Log => _log;
+    public ITextureProvider TextureProvider => _textureProvider;
 
     private DateTime _lastBackup = DateTime.MinValue;
     private DateTime _lastAutoBackup = DateTime.MinValue;
@@ -52,7 +56,8 @@ public sealed class GlamourerBackup : IDalamudPlugin
         IPluginLog log,
         IFramework framework,
         IObjectTable objectTable,
-        IClientState clientState)
+        IClientState clientState,
+        ITextureProvider textureProvider)
     {
         _pluginInterface = pluginInterface;
         _commandManager = commandManager;
@@ -60,6 +65,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
         _framework = framework;
         _objectTable = objectTable;
         _clientState = clientState;
+        _textureProvider = textureProvider;
 
         Configuration = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         Configuration.Initialize(pluginInterface);
@@ -74,6 +80,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
 
         _currentOutfitDir = Path.Combine(_backupBaseDir, "CurrentOutfit");
         _autoBackupPath = Path.Combine(_currentOutfitDir, "auto_backup.json");
+        _bundledBackgroundPath = Path.Combine(Path.GetDirectoryName(GetType().Assembly.Location)!, "background.jpg");
 
         if (!Directory.Exists(_backupBaseDir))
             Directory.CreateDirectory(_backupBaseDir);
@@ -114,6 +121,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
         _pluginInterface.UiBuilder.Draw -= OnDraw;
         _pluginInterface.UiBuilder.OpenConfigUi -= ToggleSettings;
         _commandManager.RemoveHandler(CommandName);
+        SettingsWindow.DisposeBackgroundTexture();
         _windowSystem.RemoveAllWindows();
     }
 
@@ -382,6 +390,15 @@ public sealed class GlamourerBackup : IDalamudPlugin
         }
     }
 
+    public string? GetBackgroundImagePath()
+    {
+        var overridePath = Path.Combine(_pluginInterface.ConfigDirectory.FullName, "background.png");
+        if (File.Exists(overridePath))
+            return overridePath;
+
+        return File.Exists(_bundledBackgroundPath) ? _bundledBackgroundPath : null;
+    }
+
     private void PruneOldBackups()
     {
         try
@@ -443,6 +460,10 @@ public class SettingsWindow : Window
     private bool _includeOrg;
     private bool _includeCurrentOutfit;
     private bool _betterAutomation;
+    private bool _showBackground;
+    private float _backgroundDim;
+    private IDalamudTextureWrap? _backgroundTexture;
+    private bool _bgLoadStarted;
     private string _statusMessage = string.Empty;
     private int _statusFrameCount;
     private string[] _backupFiles = [];
@@ -470,11 +491,15 @@ public class SettingsWindow : Window
         _includeOrg = _plugin.Configuration.IncludeOrganization;
         _includeCurrentOutfit = _plugin.Configuration.IncludeCurrentOutfit;
         _betterAutomation = _plugin.Configuration.BetterAutomation;
+        _showBackground = _plugin.Configuration.ShowBackgroundImage;
+        _backgroundDim = _plugin.Configuration.BackgroundDim;
         _backupFiles = _plugin.GetCurrentOutfitBackups();
     }
 
     public override void Draw()
     {
+        DrawBackground();
+
         var changed = false;
 
         changed |= ImGui.InputInt("Backup interval (minutes)", ref _intervalMinutes);
@@ -557,6 +582,27 @@ public class SettingsWindow : Window
             _applyStatusFrames++;
         }
 
+        ImGui.Separator();
+        ImGui.Text("Background");
+
+        if (ImGui.Checkbox("Show background image", ref _showBackground))
+        {
+            changed = true;
+            if (_showBackground)
+            {
+                _bgLoadStarted = false;
+            }
+            else
+            {
+                _backgroundTexture?.Dispose();
+                _backgroundTexture = null;
+            }
+        }
+
+        changed |= ImGui.SliderFloat("Background dimming", ref _backgroundDim, 0f, 1f, "%.2f");
+
+        ImGui.TextWrapped("Drop your own background.png into the plugin config folder to override the bundled image.");
+
         if (changed)
         {
             _plugin.Configuration.BackupIntervalMinutes = _intervalMinutes;
@@ -566,7 +612,68 @@ public class SettingsWindow : Window
             _plugin.Configuration.IncludeOrganization = _includeOrg;
             _plugin.Configuration.IncludeCurrentOutfit = _includeCurrentOutfit;
             _plugin.Configuration.BetterAutomation = _betterAutomation;
+            _plugin.Configuration.ShowBackgroundImage = _showBackground;
+            _plugin.Configuration.BackgroundDim = _backgroundDim;
             _plugin.Configuration.Save();
         }
+    }
+
+    private void DrawBackground()
+    {
+        if (_backgroundTexture == null && !_bgLoadStarted && _plugin.Configuration.ShowBackgroundImage)
+            _ = StartBackgroundLoadAsync();
+
+        if (_backgroundTexture is not { } tex)
+            return;
+
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetWindowPos();
+        var size = ImGui.GetWindowSize();
+
+        var texW = tex.Width;
+        var texH = tex.Height;
+        if (texW <= 0 || texH <= 0)
+            return;
+
+        var scale = MathF.Max(size.X / texW, size.Y / texH);
+        var scaledW = texW * scale;
+        var scaledH = texH * scale;
+        var u0 = (scaledW - size.X) / (2 * scaledW);
+        var v0 = (scaledH - size.Y) / (2 * scaledH);
+        var u1 = 1f - u0;
+        var v1 = 1f - v0;
+
+        drawList.AddImage(tex.Handle, pos, pos + size, new Vector2(u0, v0), new Vector2(u1, v1));
+
+        var dim = Math.Clamp(_plugin.Configuration.BackgroundDim, 0f, 1f);
+        if (dim > 0f)
+            drawList.AddRectFilled(pos, pos + size, ImGui.ColorConvertFloat4ToU32(new Vector4(0, 0, 0, dim)));
+    }
+
+    private async Task StartBackgroundLoadAsync()
+    {
+        _bgLoadStarted = true;
+
+        var path = _plugin.GetBackgroundImagePath();
+        if (path == null)
+            return;
+
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var tex = await _plugin.TextureProvider.CreateFromImageAsync(stream);
+            _backgroundTexture?.Dispose();
+            _backgroundTexture = tex;
+        }
+        catch (Exception ex)
+        {
+            _plugin.Log.Warning(ex, "Failed to load background image {Path}", path);
+        }
+    }
+
+    public void DisposeBackgroundTexture()
+    {
+        _backgroundTexture?.Dispose();
+        _backgroundTexture = null;
     }
 }
