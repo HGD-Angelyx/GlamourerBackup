@@ -41,6 +41,10 @@ public sealed class GlamourerBackup : IDalamudPlugin
     private DateTime _lastBackup = DateTime.MinValue;
     private DateTime _lastAutoBackup = DateTime.MinValue;
     private bool _settingsVisible;
+    private bool _applyAutoRestorePending;
+    private bool _autoRestoreRunning;
+    private int _autoRestoreAttempts;
+    private long _nextAutoRestoreTick;
 
     public GlamourerBackup(
         IDalamudPluginInterface pluginInterface,
@@ -95,10 +99,10 @@ public sealed class GlamourerBackup : IDalamudPlugin
         _clientState.Login += OnLogin;
 
         if (Configuration.BackupOnPluginStart)
-            _ = RunBackupAsync();
+            _framework.RunOnFrameworkThread(() => { _ = RunBackupAsync(); });
 
-        if (Configuration.BetterAutomation && _objectTable.LocalPlayer != null)
-            _ = ApplyAutoBackupAsync();
+        if (Configuration.BetterAutomation)
+            _applyAutoRestorePending = true;
 
         _log.Information("Glamourer Backup loaded.");
     }
@@ -132,6 +136,15 @@ public sealed class GlamourerBackup : IDalamudPlugin
             _ = RunBackupAsync();
         }
 
+        if (_applyAutoRestorePending && _objectTable.LocalPlayer != null)
+        {
+            _applyAutoRestorePending = false;
+            StartAutoRestore();
+        }
+
+        if (_autoRestoreRunning && Environment.TickCount64 >= _nextAutoRestoreTick)
+            TryAutoRestoreTick();
+
         if (Configuration.BetterAutomation && _objectTable.LocalPlayer != null)
         {
             var autoElapsed = DateTime.UtcNow - _lastAutoBackup;
@@ -145,8 +158,9 @@ public sealed class GlamourerBackup : IDalamudPlugin
 
     private void OnLogin()
     {
+        _applyAutoRestorePending = false;
         if (Configuration.BetterAutomation)
-            _ = ApplyAutoBackupAsync();
+            StartAutoRestore();
     }
 
     public async Task RunBackupAsync()
@@ -264,55 +278,67 @@ public sealed class GlamourerBackup : IDalamudPlugin
         }
     }
 
-    private async Task ApplyAutoBackupAsync()
+    private void StartAutoRestore()
     {
-        if (!File.Exists(_autoBackupPath))
-        {
-            _log.Information("Better automation: no auto backup found, skipping auto-restore.");
+        if (_autoRestoreRunning)
             return;
-        }
 
-        await Task.Delay(2000);
+        _autoRestoreRunning = true;
+        _autoRestoreAttempts = 0;
+        _nextAutoRestoreTick = Environment.TickCount64;
+    }
 
-        for (var attempt = 0; attempt < 5; attempt++)
+    private void TryAutoRestoreTick()
+    {
+        try
         {
-            if (attempt > 0)
-                await Task.Delay(3000);
+            if (!File.Exists(_autoBackupPath))
+            {
+                _log.Information("Better automation: no auto backup found, skipping auto-restore.");
+                FinishAutoRestore();
+                return;
+            }
 
             var player = _objectTable.LocalPlayer;
-            if (player == null)
+            if (player != null && _applyState is { } apply && apply.HasFunction)
             {
-                _log.Warning("Better automation: no local player yet, waiting...");
-                continue;
-            }
-
-            if (_applyState == null || !_applyState.HasFunction)
-            {
-                _log.Warning("Better automation: Glamourer not ready yet, retrying...");
-                continue;
-            }
-
-            try
-            {
-                var json = await File.ReadAllTextAsync(_autoBackupPath);
+                var json = File.ReadAllText(_autoBackupPath);
                 var stateObj = JObject.Parse(json);
-                var ec = _applyState.InvokeFunc(stateObj, player.Name.TextValue, 0u, 6);
+                var ec = apply.InvokeFunc(stateObj, player.Name.TextValue, 0u, 6);
 
                 if (ec == 0)
                 {
-                    _log.Information("Better automation: auto-restore applied to {Player}", player.Name.TextValue);
+                    _log.Information("Better automation: auto-restore applied to {Player}.", player.Name.TextValue);
+                    FinishAutoRestore();
                     return;
                 }
 
                 _log.Warning("Better automation: apply failed (error {Ec}), retrying...", ec);
             }
-            catch (Exception ex)
+            else
             {
-                _log.Warning(ex, "Better automation: failed to apply auto-restore, retrying...");
+                _log.Warning("Better automation: player or Glamourer not ready yet, retrying...");
             }
         }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "Better automation: failed to apply auto-restore, retrying...");
+        }
 
-        _log.Error("Better automation: could not apply auto-restore after multiple attempts.");
+        if (++_autoRestoreAttempts >= 5)
+        {
+            _log.Error("Better automation: could not apply auto-restore after multiple attempts.");
+            FinishAutoRestore();
+            return;
+        }
+
+        _nextAutoRestoreTick = Environment.TickCount64 + 3000;
+    }
+
+    private void FinishAutoRestore()
+    {
+        _autoRestoreRunning = false;
+        _autoRestoreAttempts = 0;
     }
 
     public void ApplyBackup(string filePath)
