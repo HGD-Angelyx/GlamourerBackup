@@ -80,7 +80,10 @@ public sealed class GlamourerBackup : IDalamudPlugin
 
         _currentOutfitDir = Path.Combine(_backupBaseDir, "CurrentOutfit");
         _autoBackupPath = Path.Combine(_currentOutfitDir, "auto_backup.json");
-        _bundledBackgroundPath = Path.Combine(Path.GetDirectoryName(GetType().Assembly.Location)!, "background.jpg");
+        var pluginDir = _pluginInterface.AssemblyLocation?.FullName is { } location
+            ? Path.GetDirectoryName(location)
+            : null;
+        _bundledBackgroundPath = pluginDir is { } dir ? Path.Combine(dir, "background.jpg") : string.Empty;
 
         if (!Directory.Exists(_backupBaseDir))
             Directory.CreateDirectory(_backupBaseDir);
