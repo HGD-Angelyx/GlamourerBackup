@@ -14,18 +14,21 @@ namespace GlamourerBackup;
 public sealed class GlamourerBackup : IDalamudPlugin
 {
     private const string CommandName = "/gbackup";
+    private const double AutoBackupIntervalSeconds = 30;
 
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly ICommandManager _commandManager;
     private readonly IPluginLog _log;
     private readonly IFramework _framework;
     private readonly IObjectTable _objectTable;
+    private readonly IClientState _clientState;
     private readonly WindowSystem _windowSystem;
 
     private readonly string _glamourerDesignsDir;
     private readonly string _glamourerConfigDir;
     private readonly string _backupBaseDir;
     private readonly string _currentOutfitDir;
+    private readonly string _autoBackupPath;
 
     private readonly ICallGateSubscriber<string, uint, (int, JObject?)>? _getState;
     private readonly ICallGateSubscriber<JObject, string, uint, int, int>? _applyState;
@@ -36,6 +39,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
     public IPluginLog Log => _log;
 
     private DateTime _lastBackup = DateTime.MinValue;
+    private DateTime _lastAutoBackup = DateTime.MinValue;
     private bool _settingsVisible;
 
     public GlamourerBackup(
@@ -43,13 +47,15 @@ public sealed class GlamourerBackup : IDalamudPlugin
         ICommandManager commandManager,
         IPluginLog log,
         IFramework framework,
-        IObjectTable objectTable)
+        IObjectTable objectTable,
+        IClientState clientState)
     {
         _pluginInterface = pluginInterface;
         _commandManager = commandManager;
         _log = log;
         _framework = framework;
         _objectTable = objectTable;
+        _clientState = clientState;
 
         Configuration = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         Configuration.Initialize(pluginInterface);
@@ -63,6 +69,7 @@ public sealed class GlamourerBackup : IDalamudPlugin
         _glamourerDesignsDir = Path.Combine(pluginConfigsDir, "designs");
 
         _currentOutfitDir = Path.Combine(_backupBaseDir, "CurrentOutfit");
+        _autoBackupPath = Path.Combine(_currentOutfitDir, "auto_backup.json");
 
         if (!Directory.Exists(_backupBaseDir))
             Directory.CreateDirectory(_backupBaseDir);
@@ -85,15 +92,20 @@ public sealed class GlamourerBackup : IDalamudPlugin
         _pluginInterface.UiBuilder.OpenConfigUi += ToggleSettings;
 
         _framework.Update += OnFrameworkUpdate;
+        _clientState.Login += OnLogin;
 
         if (Configuration.BackupOnPluginStart)
             _ = RunBackupAsync();
+
+        if (Configuration.BetterAutomation && _objectTable.LocalPlayer != null)
+            _ = ApplyAutoBackupAsync();
 
         _log.Information("Glamourer Backup loaded.");
     }
 
     public void Dispose()
     {
+        _clientState.Login -= OnLogin;
         _framework.Update -= OnFrameworkUpdate;
         _pluginInterface.UiBuilder.Draw -= OnDraw;
         _pluginInterface.UiBuilder.OpenConfigUi -= ToggleSettings;
@@ -119,6 +131,22 @@ public sealed class GlamourerBackup : IDalamudPlugin
             _lastBackup = DateTime.UtcNow;
             _ = RunBackupAsync();
         }
+
+        if (Configuration.BetterAutomation && _objectTable.LocalPlayer != null)
+        {
+            var autoElapsed = DateTime.UtcNow - _lastAutoBackup;
+            if (autoElapsed.TotalSeconds >= AutoBackupIntervalSeconds)
+            {
+                _lastAutoBackup = DateTime.UtcNow;
+                _ = RunAutoBackupAsync();
+            }
+        }
+    }
+
+    private void OnLogin()
+    {
+        if (Configuration.BetterAutomation)
+            _ = ApplyAutoBackupAsync();
     }
 
     public async Task RunBackupAsync()
@@ -207,6 +235,84 @@ public sealed class GlamourerBackup : IDalamudPlugin
         {
             _log.Warning(ex, "Failed to back up current outfit (Glamourer might not be installed)");
         }
+    }
+
+    private async Task RunAutoBackupAsync()
+    {
+        var player = _objectTable.LocalPlayer;
+        if (player == null)
+            return;
+
+        try
+        {
+            var (ec, stateObj) = _getState!.InvokeFunc(player.Name.TextValue, 0u);
+
+            if (ec != 0 || stateObj == null)
+            {
+                _log.Warning("Better automation: failed to get current outfit (error {Ec})", ec);
+                return;
+            }
+
+            var json = stateObj.ToString(Formatting.Indented);
+            await File.WriteAllTextAsync(_autoBackupPath, json);
+
+            _log.Information("Better automation: current outfit auto-backed up.");
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "Better automation: failed to auto-back up current outfit");
+        }
+    }
+
+    private async Task ApplyAutoBackupAsync()
+    {
+        if (!File.Exists(_autoBackupPath))
+        {
+            _log.Information("Better automation: no auto backup found, skipping auto-restore.");
+            return;
+        }
+
+        await Task.Delay(2000);
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            if (attempt > 0)
+                await Task.Delay(3000);
+
+            var player = _objectTable.LocalPlayer;
+            if (player == null)
+            {
+                _log.Warning("Better automation: no local player yet, waiting...");
+                continue;
+            }
+
+            if (_applyState == null || !_applyState.HasFunction)
+            {
+                _log.Warning("Better automation: Glamourer not ready yet, retrying...");
+                continue;
+            }
+
+            try
+            {
+                var json = await File.ReadAllTextAsync(_autoBackupPath);
+                var stateObj = JObject.Parse(json);
+                var ec = _applyState.InvokeFunc(stateObj, player.Name.TextValue, 0u, 6);
+
+                if (ec == 0)
+                {
+                    _log.Information("Better automation: auto-restore applied to {Player}", player.Name.TextValue);
+                    return;
+                }
+
+                _log.Warning("Better automation: apply failed (error {Ec}), retrying...", ec);
+            }
+            catch (Exception ex)
+            {
+                _log.Warning(ex, "Better automation: failed to apply auto-restore, retrying...");
+            }
+        }
+
+        _log.Error("Better automation: could not apply auto-restore after multiple attempts.");
     }
 
     public void ApplyBackup(string filePath)
@@ -310,6 +416,7 @@ public class SettingsWindow : Window
     private bool _includeEph;
     private bool _includeOrg;
     private bool _includeCurrentOutfit;
+    private bool _betterAutomation;
     private string _statusMessage = string.Empty;
     private int _statusFrameCount;
     private string[] _backupFiles = [];
@@ -322,7 +429,7 @@ public class SettingsWindow : Window
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(460, 400),
-            MaximumSize = new Vector2(700, 600)
+            MaximumSize = new Vector2(700, 720)
         };
         Flags = ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.AlwaysAutoResize;
         LoadSettings();
@@ -336,6 +443,7 @@ public class SettingsWindow : Window
         _includeEph = _plugin.Configuration.IncludeEphemeralConfig;
         _includeOrg = _plugin.Configuration.IncludeOrganization;
         _includeCurrentOutfit = _plugin.Configuration.IncludeCurrentOutfit;
+        _betterAutomation = _plugin.Configuration.BetterAutomation;
         _backupFiles = _plugin.GetCurrentOutfitBackups();
     }
 
@@ -354,6 +462,11 @@ public class SettingsWindow : Window
 
         changed |= ImGui.Checkbox("Backup ephemeral config", ref _includeEph);
         changed |= ImGui.Checkbox("Backup folder organization", ref _includeOrg);
+
+        ImGui.Separator();
+        ImGui.Text("Better Automation");
+        ImGui.TextWrapped("Backs up your current outfit every 30 seconds and automatically restores it after a crash or restart.");
+        changed |= ImGui.Checkbox("Enable better automation", ref _betterAutomation);
 
         ImGui.Separator();
         ImGui.Text("Current Outfit Backup");
@@ -426,6 +539,7 @@ public class SettingsWindow : Window
             _plugin.Configuration.IncludeEphemeralConfig = _includeEph;
             _plugin.Configuration.IncludeOrganization = _includeOrg;
             _plugin.Configuration.IncludeCurrentOutfit = _includeCurrentOutfit;
+            _plugin.Configuration.BetterAutomation = _betterAutomation;
             _plugin.Configuration.Save();
         }
     }

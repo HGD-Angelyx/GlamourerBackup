@@ -16,6 +16,7 @@ public class Configuration : IPluginConfiguration
     public bool IncludeEphemeralConfig { get; set; } = true;
     public bool IncludeOrganization { get; set; } = true;
     public bool IncludeCurrentOutfit { get; set; } = true;
+    public bool BetterAutomation { get; set; } = false;
 
     [NonSerialized] private IDalamudPluginInterface? _pi;
 
